@@ -12,8 +12,9 @@
       xdg.enable = true;
 
       # programs
-      browser = "brave";
-      editor = "zed";
+      # browser = "brave";
+      browser = "ungoogled-chromium";
+      # editor = "zed";
       emacs.enable = true;
       vscodium.enable = true;
       yazi.enable = true;

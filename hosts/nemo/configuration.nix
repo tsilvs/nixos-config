@@ -23,7 +23,7 @@
         virtualMachines.enable = true;
         winapps.enable = true;
       };
-      brave.enable = true;
+      # brave.enable = true;
 
       # wm
       plasma.enable = true;

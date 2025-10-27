@@ -1,0 +1,3 @@
+[submodule "modules/themes"]
+	path = modules/themes
+	url = git@github.com:tsilvs/nix-themes-base16
