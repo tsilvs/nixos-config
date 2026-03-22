@@ -1,0 +1,161 @@
+* Implementation Plan
+
+Ordered by least work / most impact.
+Each module should expose cascade-traceable NixOS/HM options: system sets defaults, host overrides, user promotes/demotes as permitted.
+
+*Known risks:*
+- Ph4 (LUKS-in-VM + SecureBoot emulation) is non-trivial — effort is Days, not Hours
+- Ph9 workspace scope must not diverge from ~settings.*~ pattern — see note in that phase
+- Ph10 (yad + Nix AST) is significant scope; treat as a separate project if pursued
+
+** Phase 1 — Structural skeleton
+:PROPERTIES:
+:IMPACT: Unlocks everything; all later phases plug into this
+:EFFORT: Hours
+:END:
+
++ [ ] Port ~example/flake.nix~ host-auto-discovery pattern (~builtins.readDir ./hosts~) into repo root
++ [ ] Define a ~settings~ attrset with explicit scope as the first key in the hierarchy, passed as ~specialArgs~:
+  #+BEGIN_SRC nix
+  settings = {
+    system.kernel.variant  = "zen";
+    user.editor            = "neovim";
+    workspace.devtools     = [ "nodejs" ];
+    session.theme          = "nord";
+  };
+  #+END_SRC
+  + Scope is structurally encoded — no field, no alias, no naming convention
+  + Promote/demote = move option between ~settings.system.*~ / ~settings.user.*~ / ~settings.workspace.*~ / ~settings.session.*~
+  + NixOS modules receive ~settings.system~; HM modules receive ~settings.user~; passed transparently via ~specialArgs~
++ [ ] Add ~hosts/TEMPLATE/~ with annotated stubs:
+  + [ ] ~configuration.nix~ (system scope)
+  + [ ] ~home.nix~ (user scope)
+  + [ ] ~hardware-configuration.nix~
++ [ ] ~modules/system/users/~ — user definitions, groups, shells as cascade options (system scope; HM handles user scope)
++ [ ] ~modules/system/nix/~ — nix daemon: substituters, binary caches, experimental features, GC policy
++ [ ] ~lib/mkCascadeOption.nix~ — shared helper for defining options that are cascade-traceable; used by all module phases
++ [ ] ~lib/mkDE.nix~ — factory for DE enablement modules (used in Ph2 to avoid copy-paste drift)
++ [ ] ~nixcfg~ CLI — expose as flake app (~nix run .#nixcfg~), not a system package:
+  + Interface contract (define before Ph1 ships; other phases depend on it):
+    + ~nixcfg sync~ — rebuild and switch system + HM state
+    + ~nixcfg update [INPUT]~ — update all or one flake input
+    + ~nixcfg gc [Xd|full]~ — garbage collect by age or completely
+    + ~nixcfg lock~ / ~nixcfg unlock~ — toggle dotfile write permissions
+    + ~nixcfg promote <option> <from-scope> <to-scope>~ — move a ~settings.*~ entry between scopes
+    + ~nixcfg build~ — build all host configs (CI / attic push)
+
+** Phase 2 — Theming / DE
+:PROPERTIES:
+:IMPACT: Highest visible impact per line of code; satisfies "centralized layered config" requirement
+:EFFORT: Hours
+:END:
+
++ [ ] Wire [[https://github.com/nix-community/stylix][Stylix]] + [[https://github.com/SenchoPens/base16.nix][base16.nix]] from example system/user stylix modules
++ [ ] Port themes submodule (~nix-themes-base16~) for on-the-fly multi-theme switching
++ [ ] ~modules/system/hyprland/~, ~modules/system/gnome/~, ~modules/system/plasma/~
+  + All built via ~lib/mkDE~ factory — no copy-paste between DE modules
+  + ~settings.system.desktop~ selects active DE per host; factory generates the correct module
+
+** Phase 3 — Hardware & Kernel
+:PROPERTIES:
+:IMPACT: Directly addresses feat/README hardware requirements (HDMI stability, GPU drivers)
+:EFFORT: Hours
+:END:
+
++ [ ] ~modules/system/kernel/~ — ~settings.system.kernel.variant~ (default/zen/hardened/lts), extra params, extra modules
++ [ ] ~modules/system/hardware/~ — GPU driver selection, HDMI stability workarounds, display output options
+  + ~settings.system.gpu~: ~{ vendor, driver, extraConfig }~ overridable per host
++ [ ] ~modules/system/powerprofiles/~ + ~modules/system/tlp/~ — ~settings.system.powerProfile~ (battery/balanced/performance) per host
+
+** Phase 4 — Virtualization
+:PROPERTIES:
+:IMPACT: Satisfies "best possible virtualization" requirement
+:EFFORT: Days (LUKS-in-VM + SecureBoot emulation non-trivial; GPU passthrough requires host-specific tuning)
+:END:
+
++ [ ] ~modules/system/virtualization/virtual-machines/~ — GPU & CPU passthrough, correct SecureBoot emulation, LUKS virtualization
++ [ ] ~modules/system/virtualization/docker/~
++ [ ] ~modules/system/virtualization/winapps/~
+  + All exposed as ~settings.system.virtualization.*~ per host
+
+** Phase 5 — Networking & Security
+:PROPERTIES:
+:IMPACT: Baseline hardening; each sub-module is a cascade-aware option overridable per host
+:EFFORT: Hours (copy-adapt from example security subtree)
+:END:
+
++ [ ] ~modules/system/security/firewall/~ — cascade option: default ruleset at system, host adds rules
++ [ ] ~modules/system/security/sshd/~ — authorized keys, port, hardening; cascade: system defaults, host overrides
++ [ ] ~modules/system/security/doas/~ — privilege escalation config
++ [ ] ~modules/system/security/gpg/~ — agent, keyserver
++ [ ] ~modules/system/security/openvpn/~ — ~settings.system.security.vpn.*~ per host
+  + HM counterpart: ~settings.user.security.vpn.*~ — user-level VPN activation/credentials
++ [ ] ~modules/system/security/firejail/~ — ~settings.system.security.firejail.profiles.*~ registers sandbox profiles
+  + HM counterpart: ~settings.user.security.firejail.enable.*~ — user opts specific apps into sandbox
++ [ ] ~modules/system/security/blocklist/~ — DNS blocklist (~blocklist-hosts~ flake input)
++ [ ] ~modules/system/security/automount/~ — removable media policy
+
+** Phase 6 — System services & peripherals
+:PROPERTIES:
+:IMPACT: Completes system-scope coverage; all as cascade options
+:EFFORT: Hours (copy-adapt)
+:END:
+
++ [ ] ~modules/system/bluetooth/~ — ~settings.system.bluetooth.enable~
++ [ ] ~modules/system/printing/~ — CUPS, drivers; ~settings.system.printing.enable~
++ [ ] ~modules/system/flatpak/~ — system flatpak support; user scope adds remotes/apps
++ [ ] ~modules/system/gaming/~ — gamemode, mangohud, steam hardware support
+
+** Phase 7 — Overlays registry
+:PROPERTIES:
+:IMPACT: Extensibility; system scope controls which overlays are active per host
+:EFFORT: Hours
+:END:
+
++ [ ] ~modules/system/overlays/~ — declarative overlay registry as cascade option
+  + System sets defaults (chaotic-nyx, rust-overlay, emacs-overlay, etc.)
+  + Host can add/remove overlays via ~settings.system.overlays~
+
+** Phase 8 — App launcher configs
+:PROPERTIES:
+:IMPACT: Satisfies "App Launcher" requirement; enables system-wide custom launch configs
+:EFFORT: ~1 day (small novel invention)
+:END:
+
++ [ ] ~settings.system.launchConfigs~ — attrset keyed by app name
+  + Each entry: ~{ runner, args, flags, condition }~
+    + ~condition~: build-time Nix predicate ~pkgs: bool~ (e.g. detect install method, platform); evaluated at eval time, not activation time
+    + For activation-time guards use a ~runtimeCondition~ string field (shell expression evaluated in wrapper script)
+  + Generates wrapper scripts via ~pkgs.writeShellScriptBin~
+  + Handles: runner-prefix syntax, positional args, conditional sections, install-method awareness
++ [ ] ~settings.user.launchConfigs~ — mirrors system schema; promote/demote = move entry between scopes
+
+** Phase 9 — Workspace & Session scopes
+:PROPERTIES:
+:IMPACT: Completes the 4-level cascade (system → user → workspace → session)
+:EFFORT: Days (most novel)
+:END:
+
++ [ ] *Workspace* scope — *single source of truth is ~settings.workspace.*~*; ~devShell~ is a derived output, not a competing definition:
+  #+BEGIN_SRC nix
+  settings.workspace.devtools = [ "nodejs" "python3" ];
+  # flake generates: devShells.default = mkShell { packages = map (x: pkgs.${x}) settings.workspace.devtools; }
+  #+END_SRC
+  + ~direnv~ + ~.envrc~ activates the derived ~devShell~ automatically
+  + No separate ~devenv.nix~ / ~flake.nix~ in project root — workspace settings live in the cascade only
++ [ ] *Session* scope
+  + Ephemeral overrides via ~environment.sessionVariables~ or HM activation reading e.g. ~~/.config/session.json~
++ [ ] *Config symmetry* helper
+  + Implemented as ~nixcfg promote~ subcommand (see Ph1 interface contract)
+
+** Phase 10 — Nix AST-aware GUI (good to have)
+:PROPERTIES:
+:IMPACT: Nice UX improvement; not blocking
+:EFFORT: High — ~yad~ + Nix AST parsing is significant scope; treat as a separate sub-project if pursued; do not let it block Ph1–9
+:END:
+
++ [ ] ~yad~-based GUI app understanding custom Nix source file trees
++ [ ] 3 view modes:
+  + By config type / managed entity
+  + By scope (~system → user → workspace → session~)
+  + By config source (path → AST hierarchy)

@@ -1,0 +1,144 @@
+* nixcfg — NixOS Config Management CLI
+
+Thin flake app. Wraps existing best-in-class tools for standard operations;
+implements only what they cannot: ~settings.*~ cascade-aware subcommands.
+
+** Tool Coverage Analysis
+
+| Tool        | Covers                                              | Replaces nixcfg subcommand |
+|-------------|-----------------------------------------------------|---------------------------|
+| [[https://github.com/nix-community/nh][nh]]          | ~os switch~, ~home switch~, ~clean~ (gc + gcroots) | ~sync~, ~gc~              |
+| [[https://github.com/nix-community/nixos-cli][nixos-cli]]   | ~nixos switch~, generations, rollback               | ~sync~ (alternative)      |
+| [[https://github.com/zhaofengli/colmena][colmena]]     | multi-host parallel deploy, tags, SSH               | ~build~ + remote ~sync~   |
+| [[https://github.com/serokell/deploy-rs][deploy-rs]]   | multi-profile flake deploy                          | ~build~ (alternative)     |
+
+*Decision:* ~nh~ covers ~sync~ + ~gc~; ~colmena~ covers multi-host build/deploy.
+~nixcfg~ only needs to implement what none of these provide: ~promote~ (cascade scope management) + a unified entry point wrapping the others.
+
+** Interface Contract (compressed)
+
+| Subcommand              | Delegates to          | Custom logic                         |
+|-------------------------|-----------------------|--------------------------------------|
+| ~nixcfg sync~           | ~nh os switch~        | config path discovery; posthooks     |
+| ~nixcfg sync --user~    | ~nh home switch~      | same                                 |
+| ~nixcfg gc [Xd\|full]~  | ~nh clean all~        | age flag translation                 |
+| ~nixcfg update [INPUT]~ | ~nix flake update~    | none                                 |
+| ~nixcfg build [HOST]~   | ~colmena build~       | derives host list from ~settings.*~  |
+| ~nixcfg deploy [HOST]~  | ~colmena apply~       | SSH, parallel, tag-aware             |
+| ~nixcfg lock/unlock~    | ~chown~/~chmod~       | scope-aware file selection           |
+| ~nixcfg promote~        | *(custom only)*       | ~settings.*~ AST manipulation        |
+
+** Config Path Discovery
+
+Resolved in order:
+1. ~NIXCFG_DIR~ env var
+2. ~git rev-parse --show-toplevel~ if repo contains ~flake.nix~
+3. ~~/.config/nixcfg/path~
+4. ~/etc/nixos~
+
+** Implementation Plan
+
+*** Phase 1 — Thin wrapper (~pkgs.writeShellApplication~)
+:PROPERTIES:
+:EFFORT: Hours
+:END:
+
+*Why ~pkgs.writeShellApplication~:* shellcheck at build time; hermetic ~runtimeInputs~ PATH; idiomatic nixpkgs pattern; no ambient runtime deps.
+
+#+BEGIN_SRC nix
+# flake.nix
+packages.nixcfg = pkgs.writeShellApplication {
+  name = "nixcfg";
+  runtimeInputs = with pkgs; [ nh colmena git nix ];
+  text = builtins.readFile ./apps/nixcfg/nixcfg.sh;
+};
+apps.nixcfg = { type = "app"; program = "${packages.nixcfg}/bin/nixcfg"; };
+#+END_SRC
+
+#+BEGIN_SRC sh
+# apps/nixcfg/nixcfg.sh (set -euo pipefail injected by writeShellApplication)
+
+discover_path() {
+  [[ -n "${NIXCFG_DIR:-}" ]]           && echo "$NIXCFG_DIR" && return
+  git rev-parse --show-toplevel 2>/dev/null | xargs -I{} test -f {}/flake.nix \
+                                         && git rev-parse --show-toplevel && return
+  [[ -f "$HOME/.config/nixcfg/path" ]] && cat "$HOME/.config/nixcfg/path" && return
+  echo /etc/nixos
+}
+
+P=$(discover_path); CMD="${1:-help}"; shift || true
+
+case "$CMD" in
+  sync)   nh os   switch "$P" -- "$@" ;;          # --dry-run passthrough
+  home)   nh home switch "$P" -- "$@" ;;
+  gc)     nh clean all "${1:-30d}" ;;
+  update) cd "$P"; nix flake update "$@" ;;
+  build)  colmena build  --flake "$P" "$@" ;;
+  deploy) colmena apply  --flake "$P" "$@" ;;
+  lock)   sudo chown -R root:root "$P"/{modules/system,hosts}; sudo chmod -R a-w "$P" ;;
+  unlock) sudo chown -R "$USER:$USER" "$P"; sudo chmod -R u+w "$P" ;;
+  *)      echo "nixcfg {sync|home|gc|update|build|deploy|lock|unlock|promote}"; exit 1 ;;
+esac
+#+END_SRC
+
++ [ ] Write ~apps/nixcfg/nixcfg.sh~
++ [ ] Wire ~packages~ + ~apps~ in ~flake.nix~
++ [ ] ~modules/system/nixcfg/default.nix~ — install into ~PATH~:
+  #+BEGIN_SRC nix
+  environment.systemPackages = [ inputs.self.packages.${pkgs.stdenv.system}.nixcfg ];
+  #+END_SRC
+
+*** Phase 2 — ~promote~ subcommand
+:PROPERTIES:
+:EFFORT: 1–2 days
+:END:
+
+No existing tool handles ~settings.<scope>.*~ cascade relocation — this is the only novel logic in ~nixcfg~.
+
+*Stage A — ~sed~ (ship fast):*
+Sufficient for single-line scalar values (~string~, ~bool~, ~int~); fails loudly on multi-line values (guarded by ~nix flake check~).
+
+#+BEGIN_SRC sh
+# nixcfg promote kernel.variant system user
+LINE=$(grep -rn "settings\.${FROM}\.${OPTION}\s*=" "$P" | head -1)
+FILE=$(cut -d: -f1 <<< "$LINE")
+VAL=$(cut -d= -f2- <<< "$LINE" | sed 's/;.*//' | xargs)
+sed -i "/settings\.${FROM}\.${OPTION}\s*=/d" "$FILE"
+TARGET=$(grep -rl "settings\.${TO}" "$P" | head -1)
+sed -i "/settings\.${TO}\s*=\s*{/ a\\    ${OPTION} = ${VAL};" "$TARGET"
+alejandra "$FILE" "$TARGET"
+nix flake check "$P"
+#+END_SRC
+
+*Stage B — ~rnix~-based AST binary (correctness):*
+Replaces stage A internals; identical CLI surface.
+
+*Why ~rnix~* over alternatives:
+- ~tree-sitter-nix~ (Python): grammar lags Nix syntax updates; less maintained
+- ~nix-instantiate --parse~: read-only AST dump, cannot reconstruct source
+- ~rnix-parser~: used by [[https://github.com/oxalica/nil][nil]] LSP + [[https://github.com/kamadorueda/alejandra][alejandra]]; handles multiline values, comments, string interpolation; actively maintained
+
+#+BEGIN_SRC nix
+packages.nixcfg-promote = pkgs.rustPlatform.buildRustPackage {
+  name = "nixcfg-promote";
+  src = ./apps/nixcfg-promote;
+  cargoLock.lockFile = ./apps/nixcfg-promote/Cargo.lock;
+  # deps: rnix, rowan, walkdir, anyhow
+};
+#+END_SRC
+
+Add ~nixcfg-promote~ to ~runtimeInputs~; ~promote~ case delegates to it transparently.
+
++ [ ] Stage A: implement ~promote~ in shell; add ~alejandra~ to ~runtimeInputs~
++ [ ] Stage B: ~apps/nixcfg-promote/~ Rust crate; wire into flake; regression-test against stage A cases
+
+*** Phase 3 — Remote / multi-host
+:PROPERTIES:
+:EFFORT: Hours (colmena already does the work)
+:END:
+
+~colmena~ handles parallel SSH deploy, tagging, build-on-remote — no custom logic needed.
+~nixcfg build/deploy~ just ensure ~colmena~ receives the correct ~--flake~ path and any host tags derived from ~settings.system.*~.
+
++ [ ] Verify ~colmena~ host definitions align with ~hosts/~ auto-discovery pattern
++ [ ] Pass ~settings.system.build.distributedBuilders~ to ~colmena~ if set
