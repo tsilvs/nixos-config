@@ -1,0 +1,50 @@
+* Expected features
+
+** General structure
+
++ Config cascade: foundational and granular configs
+	+ System
+	+ User
+	+ Workspace
+	+ Session
++ Config symmetry: configs from one scope should be possible to promote / demote seamlessly to other scope
+
+** System
+
++ Best possible hardware support
+	+ No GUI crashes with HDMI
+	+ Most stable GPU drivers
++ Best possible virtualization features support
+	+ GPU & CPU shared usage / passthrough
+	+ Correct SecureBoot emulation
+	+ Correct LUKS virtualization
+
+** GUI
+
+*** DE
+
+**** Theming
+
++ Centralized layered config
+	+ Defaults & Customs on every config cascade level
+
+**** App Launcher
+
++ Should store system-wide custom launch configs for apps based on the specifics, such as:
+	+ Command structure with positional arguments.
+		+ Conditional sections relevant to how the command is installed as, and, if it does rely on a runner, prefix and/or wrap with the runner call syntax.
+			+ Special syntax for the runner.
+	+ Custom run flags.
+
+** Configs
+
++ Should store 
+
+* Good to have
+
++ A Nix AST-aware GUI config app (maybe made with ~yad~)
+	+ Capable of understanding custom Nix source file trees
+	+ Capable of at least 3 visual mode representations (not necessarily 3 different screens, can be extra info / control elements on each entity representation GUI component)
+		+ By config type / managed entity (system configs, installed packages, app launch params, GUI theme, etc.)
+		+ By scope (~system -> user -> workspace -> session~)
+		+ By config source (~path to file or module -> path in AST code hierarchy~)
